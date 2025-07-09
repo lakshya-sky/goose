@@ -3,6 +3,8 @@ pub mod azure;
 pub mod azureauth;
 pub mod base;
 pub mod bedrock;
+pub mod claude;
+pub mod claude_oauth;
 pub mod claude_code;
 pub mod databricks;
 pub mod embedding;

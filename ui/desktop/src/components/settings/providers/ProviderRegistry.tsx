@@ -98,6 +98,15 @@ export const PROVIDER_REGISTRY: ProviderRegistry[] = [
     },
   },
   {
+    name: 'Claude',
+    details: {
+      id: 'claude',
+      name: 'Claude',
+      description: 'Access Claude models via OAuth authentication',
+      parameters: [], // OAuth is handled automatically
+    },
+  },
+  {
     name: 'xAI',
     details: {
       id: 'xai',

@@ -176,6 +176,30 @@ pub fn format_system(system: &str) -> Value {
     }])
 }
 
+/// Convert multiple system messages to Anthropic's API system specification
+fn format_multiple_systems(systems: &[&str]) -> Value {
+    let mut system_blocks = Vec::new();
+    
+    for (i, system) in systems.iter().enumerate() {
+        let mut block = json!({
+            "type": "text",
+            "text": system
+        });
+        
+        // Add cache control to the last block only
+        if i == systems.len() - 1 {
+            block.as_object_mut().unwrap().insert(
+                "cache_control".to_string(), 
+                json!({ "type": "ephemeral" })
+            );
+        }
+        
+        system_blocks.push(block);
+    }
+    
+    json!(system_blocks)
+}
+
 /// Convert Anthropic's API response to internal Message format
 pub fn response_to_message(response: Value) -> Result<Message> {
     let content_blocks = response
@@ -309,9 +333,23 @@ pub fn create_request(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
+    create_request_multi_system(model_config, &[system], messages, tools)
+}
+
+/// Create a complete request payload for Anthropic's API with multiple system prompts
+pub fn create_request_multi_system(
+    model_config: &ModelConfig,
+    systems: &[&str],
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<Value> {
     let anthropic_messages = format_messages(messages);
     let tool_specs = format_tools(tools);
-    let system_spec = format_system(system);
+    let system_spec = match systems.len() {
+        0 => json!([]),
+        1 => format_system(systems[0]),
+        _ => format_multiple_systems(systems),
+    };
 
     // Check if we have any messages to send
     if anthropic_messages.is_empty() {
@@ -320,7 +358,13 @@ pub fn create_request(
 
     // https://docs.anthropic.com/en/docs/about-claude/models/all-models#model-comparison-table
     // Claude 3.7 supports max output tokens up to 8192
-    let max_tokens = model_config.max_tokens.unwrap_or(8192);
+    let mut max_tokens = model_config.max_tokens.unwrap_or(8192);
+
+    if model_config.model_name.starts_with("claude-opus-4-") || model_config.model_name.starts_with("claude-sonnet-4-"){
+        max_tokens = 32000
+    }
+
+
     let mut payload = json!({
         "model": model_config.model_name,
         "messages": anthropic_messages,
@@ -328,11 +372,11 @@ pub fn create_request(
     });
 
     // Add system message if present
-    if !system.is_empty() {
+    if !systems.is_empty() {
         payload
             .as_object_mut()
             .unwrap()
-            .insert("system".to_string(), json!(system_spec));
+            .insert("system".to_string(), system_spec);
     }
 
     // Add tools if present
@@ -689,6 +733,109 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(13007));
         assert_eq!(usage.output_tokens, Some(50));
         assert_eq!(usage.total_tokens, Some(13057)); // 13007 + 50
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_format_multiple_systems() {
+        // Test empty systems
+        let systems: &[&str] = &[];
+        let spec = format_multiple_systems(systems);
+        assert!(spec.is_array());
+        assert_eq!(spec.as_array().unwrap().len(), 0);
+
+        // Test single system
+        let systems = &["You are a helpful assistant."];
+        let spec = format_multiple_systems(systems);
+        assert!(spec.is_array());
+        let spec_array = spec.as_array().unwrap();
+        assert_eq!(spec_array.len(), 1);
+        assert_eq!(spec_array[0]["type"], "text");
+        assert_eq!(spec_array[0]["text"], "You are a helpful assistant.");
+        assert!(spec_array[0].get("cache_control").is_some());
+
+        // Test multiple systems
+        let systems = &[
+            "You are a helpful assistant.",
+            "You specialize in Rust programming.",
+            "You provide clear and concise answers."
+        ];
+        let spec = format_multiple_systems(systems);
+        assert!(spec.is_array());
+        let spec_array = spec.as_array().unwrap();
+        assert_eq!(spec_array.len(), 3);
+        
+        // Check first system (no cache control)
+        assert_eq!(spec_array[0]["type"], "text");
+        assert_eq!(spec_array[0]["text"], "You are a helpful assistant.");
+        assert!(spec_array[0].get("cache_control").is_none());
+        
+        // Check second system (no cache control)
+        assert_eq!(spec_array[1]["type"], "text");
+        assert_eq!(spec_array[1]["text"], "You specialize in Rust programming.");
+        assert!(spec_array[1].get("cache_control").is_none());
+        
+        // Check third system (has cache control)
+        assert_eq!(spec_array[2]["type"], "text");
+        assert_eq!(spec_array[2]["text"], "You provide clear and concise answers.");
+        assert!(spec_array[2].get("cache_control").is_some());
+        assert_eq!(spec_array[2]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_create_request_multi_system() -> Result<()> {
+        let model_config = ModelConfig::new("claude-3-5-sonnet-latest".to_string());
+        let messages = vec![Message::user().with_text("Hello")];
+        let tools = vec![];
+
+        // Test empty systems
+        let systems: &[&str] = &[];
+        let payload = create_request_multi_system(&model_config, systems, &messages, &tools)?;
+        assert_eq!(payload["model"], "claude-3-5-sonnet-latest");
+        assert!(payload.get("system").is_none()); // No system field when empty
+
+        // Test single system
+        let systems = &["You are a helpful assistant."];
+        let payload = create_request_multi_system(&model_config, systems, &messages, &tools)?;
+        assert!(payload.get("system").is_some());
+        let system_array = payload["system"].as_array().unwrap();
+        assert_eq!(system_array.len(), 1);
+        assert_eq!(system_array[0]["text"], "You are a helpful assistant.");
+
+        // Test multiple systems
+        let systems = &[
+            "You are a helpful assistant.",
+            "You specialize in Rust programming."
+        ];
+        let payload = create_request_multi_system(&model_config, systems, &messages, &tools)?;
+        assert!(payload.get("system").is_some());
+        let system_array = payload["system"].as_array().unwrap();
+        assert_eq!(system_array.len(), 2);
+        assert_eq!(system_array[0]["text"], "You are a helpful assistant.");
+        assert_eq!(system_array[1]["text"], "You specialize in Rust programming.");
+        assert!(system_array[1].get("cache_control").is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_request_backward_compatibility() -> Result<()> {
+        // Test that the existing create_request function still works the same
+        let model_config = ModelConfig::new("claude-3-5-sonnet-latest".to_string());
+        let system = "You are a helpful assistant.";
+        let messages = vec![Message::user().with_text("Hello")];
+        let tools = vec![];
+
+        let payload = create_request(&model_config, system, &messages, &tools)?;
+        
+        // Verify the system is properly formatted
+        assert!(payload.get("system").is_some());
+        let system_array = payload["system"].as_array().unwrap();
+        assert_eq!(system_array.len(), 1);
+        assert_eq!(system_array[0]["type"], "text");
+        assert_eq!(system_array[0]["text"], "You are a helpful assistant.");
+        assert!(system_array[0].get("cache_control").is_some());
 
         Ok(())
     }
